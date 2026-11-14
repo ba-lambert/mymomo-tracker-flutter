@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ phone.name }} — MoMo Tracker</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  {% macro type_badge(message) %}
+  <span class="badge {{ message.transaction_type }}">{{ message.transaction_type|capitalize }}</span>
+  {% endmacro %}
+
+  {% macro message_row(message, show_sender=true) %}
+  <tr data-search="{{ (message.body ~ ' ' ~ (message.reference or ''))|lower }}">
+    <td>{{ message.date.strftime('%Y-%m-%d %H:%M') }}</td>
+    {% if show_sender %}<td class="col-sender">{{ message.contact_name or message.description or message.sender }}</td>{% endif %}
+    <td>{{ type_badge(message) }}</td>
+    <td>{{ "{:,.0f}".format(message.amount) if message.amount else "-" }}</td>
+    <td class="col-message">
+      <div class="message-text" onclick="this.classList.toggle('expanded')">{{ message.body }}</div>
+      {% if message.description and message.transaction_type != 'other' %}<div class="description">{{ message.description }}</div>{% endif %}
+    </td>
+    <td class="ref">{{ message.reference or "-" }}</td>
+  </tr>
+  {% endmacro %}
+  <header>
+    <div>
+      <a class="back-link" href="/">&larr; All phones</a>
+      <h1>{{ phone.name }}</h1>
+      <div class="subtitle">Last seen {{ phone.last_seen_at.strftime('%Y-%m-%d %H:%M') }}</div>
+    </div>
+    <form method="post" action="/phones/{{ phone.id }}/delete" onsubmit="return confirm('Delete {{ phone.name }} and all its messages?');">
+      <button class="btn danger" type="submit">Delete phone</button>
+    </form>
+  </header>
+
+  <main>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon">&#128172;</div>
+        <div>
+          <div class="value">{{ messages|length }}</div>
+          <div class="label">Messages in range</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">&#128222;</div>
+        <div>
+          <div class="value">{{ sender_groups|length }}</div>
+          <div class="label">Senders</div>
+        </div>
+      </div>
+      <div class="stat-card in">
+        <div class="stat-icon">&#11015;&#65039;</div>
+        <div>
+          <div class="value">{{ "{:,.0f}".format(total_in) }}</div>
+          <div class="label">Received (RWF)</div>
+        </div>
+      </div>
+      <div class="stat-card out">
+        <div class="stat-icon">&#11014;&#65039;</div>
+        <div>
+          <div class="value">{{ "{:,.0f}".format(total_out) }}</div>
+          <div class="label">Sent (RWF)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card toolbar">
+      <form class="filter-form" method="get" action="/phones/{{ phone.id }}">
+        <label>From <input type="datetime-local" name="start" value="{{ start.strftime('%Y-%m-%dT%H:%M') if start else '' }}" /></label>
+        <label>To <input type="datetime-local" name="end" value="{{ end.strftime('%Y-%m-%dT%H:%M') if end else '' }}" /></label>
+        <button class="btn" type="submit">Filter dates</button>
+        <a class="btn secondary" href="/phones/{{ phone.id }}?start={{ month_start }}&end={{ month_end }}">This month</a>
+        <a class="btn secondary" href="/phones/{{ phone.id }}">Clear</a>
+      </form>
+      <input
+        id="searchBox"
+        class="search-box"
+        type="search"
+        placeholder="Search message text or reference..."
+        oninput="filterMessages(this.value)"
+      />
+    </div>
+
+    {% if not sender_groups %}
+    <div class="card">
+      <p class="empty">No messages in this range yet. Export from the app to see data here.</p>
+    </div>
+    {% else %}
+    <div class="dashboard-layout">
+      <aside class="card sender-sidebar">
+        <h2>Senders</h2>
+        <div class="sender-item active" data-target="all" onclick="selectSender('all', this)">
+          <span class="sender-name">All numbers</span>
+          <span class="sender-count">{{ messages|length }}</span>
+        </div>
+        {% for sender, group_messages in sender_groups %}
+        <div class="sender-item" data-target="sender-{{ loop.index }}" onclick="selectSender('sender-{{ loop.index }}', this)">
+          <span class="sender-name">{{ sender }}</span>
+          <span class="sender-count">{{ group_messages|length }}</span>
+        </div>
+        {% endfor %}
+      </aside>
+
+      <div class="dashboard-main">
+        <div class="card chart-card">
+          <h2>Messages per sender</h2>
+          {% set max_count = sender_groups | map(attribute=1) | map('length') | max %}
+          <div class="bar-chart">
+            {% for sender, group_messages in sender_groups %}
+            <div class="bar-row">
+              <span class="bar-label">{{ sender }}</span>
+              <div class="bar-track">
+                <div class="bar-fill" style="width: {{ (group_messages|length / max_count * 100)|round(1) }}%"></div>
+              </div>
+              <span class="bar-value">{{ group_messages|length }}</span>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="card panel" id="panel-all" data-panel>
+          <h2>All messages</h2>
+          <table class="message-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>From / To</th>
+                <th>Type</th>
+                <th>Amount (RWF)</th>
+                <th>Message</th>
+                <th>Reference</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for message in messages %}
+              {{ message_row(message, show_sender=true) }}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        {% for sender, group_messages in sender_groups %}
+        <div class="card panel hidden" id="panel-sender-{{ loop.index }}" data-panel>
+          <h2>{{ sender }}</h2>
+          <table class="message-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>From / To</th>
+                <th>Type</th>
+                <th>Amount (RWF)</th>
+                <th>Message</th>
+                <th>Reference</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for message in group_messages %}
+              {{ message_row(message, show_sender=true) }}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </main>
+
+  <script>
+    function selectSender(target, el) {
+      document.querySelectorAll('.sender-item').forEach((item) => item.classList.remove('active'));
+      el.classList.add('active');
+      document.querySelectorAll('[data-panel]').forEach((panel) => panel.classList.add('hidden'));
+      document.getElementById('panel-' + target).classList.remove('hidden');
+    }
+
+    function filterMessages(query) {
+      const term = query.trim().toLowerCase();
+      document.querySelectorAll('[data-panel]:not(.hidden) tbody tr').forEach((row) => {
+        const haystack = row.getAttribute('data-search') || '';
+        row.style.display = haystack.includes(term) ? '' : 'none';
+      });
+    }
+  </script>
+</body>
+</html>

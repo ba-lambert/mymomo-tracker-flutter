@@ -1,62 +1,91 @@
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../models/sms_message.dart';
 import '../models/transaction.dart';
+import 'contact_service.dart';
+import 'momo_counterparty.dart';
 import 'dart:developer' as developer;
 
 class SmsService {
   static const platform = MethodChannel('com.example.momoapp/sms');
+  final _contactService = ContactService();
 
-  Future<List<Transaction>> getTransactions() async {
-    // Request SMS permissions
+  /// Reads every SMS in the device inbox, regardless of sender, and
+  /// attaches each sender's saved contact name when one exists.
+  Future<List<SmsMessage>> getAllMessages() async {
     final status = await Permission.sms.request();
     if (!status.isGranted) {
       throw Exception('SMS permission denied');
     }
 
     try {
-      final List<dynamic> messages = await platform
-          .invokeMethod('getSmsMessages', {'address': 'M-Money'});
-      
-      developer.log('Received ${messages.length} messages');
+      final List<dynamic> messages =
+          await platform.invokeMethod('getSmsMessages');
 
-      // Filter M-Money transaction messages
-      final filteredMessages = messages
-          .where((message) =>
-              message['body'] != null &&
-              message['address'] == 'M-Money' &&
-              (message['body'].toString().contains('transferred to') ||
-               message['body'].toString().contains('payment of') ||
-               message['body'].toString().contains('received')))
+      developer.log('Read ${messages.length} SMS messages');
+
+      final rawMessages = messages
+          .where((message) => message['body'] != null)
+          .map((message) => (
+                address: (message['address'] as String?) ?? 'unknown',
+                body: message['body'] as String,
+                date: DateTime.fromMillisecondsSinceEpoch(message['date'] as int),
+              ))
           .toList();
 
-      developer.log('Filtered ${filteredMessages.length} M-Money transaction messages');
+      final result = <SmsMessage>[];
+      for (final raw in rawMessages) {
+        /* The real sender/recipient name for MoMo texts is in the body, not
+         * the address, since every MoMo SMS shares one shortcode sender. */
+        final name = MomoCounterparty.extractName(raw.body) ??
+            await _contactService.resolveName(raw.address);
+        result.add(SmsMessage(
+          address: raw.address,
+          body: raw.body,
+          date: raw.date,
+          contactName: name,
+        ));
+      }
 
-      final transactions = filteredMessages
-          .map((message) {
-            try {
-              developer.log('Processing transaction: ${message['body']}');
-              return Transaction.fromSms(
-                message['body'] as String,
-                messageDate:
-                    DateTime.fromMillisecondsSinceEpoch(message['date'] as int),
-              );
-            } catch (e) {
-              developer.log('Error processing message: $e');
-              return null;
-            }
-          })
-          .whereType<Transaction>()
-          .toList();
-
-      developer.log('Parsed ${transactions.length} transactions');
-
-      // Sort transactions by date
-      transactions.sort((a, b) => b.date.compareTo(a.date));
-
-      return transactions;
+      result.sort((a, b) => b.date.compareTo(a.date));
+      return result;
     } catch (e) {
       developer.log('Error reading SMS: $e', error: e);
       throw Exception('Failed to read SMS: $e');
     }
+  }
+
+  /// Reads MoMo ("M-Money") transaction messages only, parsed into
+  /// [Transaction]s for the home screen's list and charts.
+  ///
+  /// Drops exact duplicates (the Android SMS provider occasionally returns
+  /// the same delivered message twice) so totals and the running balance
+  /// never double-count a transaction.
+  Future<List<Transaction>> getTransactions() async {
+    final allMessages = await getAllMessages();
+
+    final momoMessages = allMessages.where((message) =>
+        message.address == 'M-Money' &&
+        (message.body.contains('transferred to') ||
+         message.body.contains('payment of') ||
+         message.body.contains('received') ||
+         message.body.contains('withdr') ||
+         message.body.contains('transaction of')));
+
+    final seen = <String>{};
+    final transactions = <Transaction>[];
+    for (final message in momoMessages) {
+      try {
+        final transaction = Transaction.fromSms(message.body, messageDate: message.date);
+        if (seen.add(transaction.dedupeKey)) {
+          transactions.add(transaction);
+        }
+      } catch (e) {
+        developer.log('Error processing message: $e');
+      }
+    }
+
+    transactions.sort((a, b) => b.date.compareTo(a.date));
+    return transactions;
   }
 }

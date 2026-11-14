@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import '../models/transaction.dart';
 import '../services/sms_service.dart';
+import '../services/settings_service.dart';
+import '../services/upload_service.dart';
+import '../services/export_service.dart';
 import 'package:intl/intl.dart';
 import 'charts_screen.dart';
 
@@ -11,13 +14,38 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+/// Visual styling (icon, color, label) for each [TransactionType], shared
+/// between the summary cards and the transaction list so both stay in sync.
+class _TypeStyle {
+  final IconData icon;
+  final Color color;
+  final String label;
+  const _TypeStyle(this.icon, this.color, this.label);
+}
+
+const _typeStyles = <TransactionType, _TypeStyle>{
+  TransactionType.received: _TypeStyle(Icons.call_received_rounded, Color(0xFF0A8754), 'Received'),
+  TransactionType.payment: _TypeStyle(Icons.storefront_rounded, Color(0xFFE08A00), 'Payment'),
+  TransactionType.transfer: _TypeStyle(Icons.call_made_rounded, Color(0xFFC0392B), 'Transfer'),
+  TransactionType.withdrawal: _TypeStyle(Icons.money_off_rounded, Color(0xFFAD1457), 'Withdrawal'),
+  TransactionType.purchase: _TypeStyle(Icons.shopping_bag_rounded, Color(0xFF5B3DC4), 'Purchase'),
+  TransactionType.other: _TypeStyle(Icons.receipt_long_rounded, Color(0xFF6B7A72), 'Other'),
+};
+
 class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
   final _smsService = SmsService();
+  final _settingsService = SettingsService();
+  final _exportService = ExportService();
   List<Transaction> _transactions = [];
+  List<Transaction> _dateFilteredTransactions = [];
   List<Transaction> _filteredTransactions = [];
   bool _isLoading = true;
+  bool _isUploading = false;
+  final ValueNotifier<String> _uploadStatus = ValueNotifier('');
+  bool _progressDialogOpen = false;
   String? _error;
   DateTimeRange? _selectedDateRange;
+  TransactionType? _selectedType;
   late TabController _tabController;
 
   @override
@@ -30,6 +58,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   @override
   void dispose() {
     _tabController.dispose();
+    _uploadStatus.dispose();
     super.dispose();
   }
 
@@ -55,16 +84,22 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   void _filterTransactions() {
-    if (_selectedDateRange == null) {
-      _filteredTransactions = List.from(_transactions);
-      return;
-    }
-
-    _filteredTransactions = _transactions.where((transaction) {
-      return transaction.date.isAfter(_selectedDateRange!.start) &&
-          transaction.date
-              .isBefore(_selectedDateRange!.end.add(const Duration(days: 1)));
+    _dateFilteredTransactions = _transactions.where((transaction) {
+      return _selectedDateRange == null ||
+          (transaction.date.isAfter(_selectedDateRange!.start) &&
+              transaction.date.isBefore(_selectedDateRange!.end.add(const Duration(days: 1))));
     }).toList();
+
+    _filteredTransactions = _selectedType == null
+        ? List.from(_dateFilteredTransactions)
+        : _dateFilteredTransactions.where((t) => t.type == _selectedType).toList();
+  }
+
+  void _setTypeFilter(TransactionType? type) {
+    setState(() {
+      _selectedType = _selectedType == type ? null : type;
+      _filterTransactions();
+    });
   }
 
   Future<void> _selectDateRange() async {
@@ -87,53 +122,242 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
   }
 
+  /// Exports every SMS in the selected date range (not just MoMo messages),
+  /// groups them by sender phone number, zips the export, and uploads it to
+  /// the backend under this device's phone name.
+  ///
+  /// Runs in the background relative to the rest of the UI, but keeps the
+  /// user informed of each stage through a progress dialog.
+  Future<void> _exportAndUpload() async {
+    final phoneName = await _ensurePhoneName();
+    if (phoneName == null) return;
+
+    setState(() => _isUploading = true);
+    _openProgressDialog();
+    try {
+      _uploadStatus.value = 'Reading SMS messages on this phone...';
+      final allMessages = await _smsService.getAllMessages();
+
+      final range = _selectedDateRange;
+      final messagesInRange = range == null
+          ? allMessages
+          : allMessages.where((message) {
+              return message.date.isAfter(range.start) &&
+                  message.date.isBefore(range.end.add(const Duration(days: 1)));
+            }).toList();
+
+      if (messagesInRange.isEmpty) {
+        _closeProgressDialog();
+        _showSnackBar('No messages to export in the selected range');
+        return;
+      }
+
+      final numbers = messagesInRange.map((m) => m.address).toSet().length;
+      _uploadStatus.value =
+          'Grouping ${messagesInRange.length} message(s) from $numbers phone number(s)...';
+      final zipFile = await _exportService.buildZipExport(messagesInRange);
+
+      _uploadStatus.value = 'Uploading export as "$phoneName" to server...';
+      final backendUrl = await _settingsService.getBackendUrl();
+      final summary = await UploadService(backendUrl).uploadZip(
+        phoneName: phoneName,
+        zipFile: zipFile,
+      );
+      await zipFile.delete();
+
+      _closeProgressDialog();
+      _showSnackBar(
+        'Uploaded ${summary.inserted} new message(s), '
+        '${summary.skippedDuplicates} already on the server',
+      );
+    } catch (e) {
+      _closeProgressDialog();
+      _showSnackBar('Upload failed: $e');
+    } finally {
+      if (mounted) setState(() => _isUploading = false);
+    }
+  }
+
+  /// Opens a non-dismissible dialog reporting live export/upload progress.
+  void _openProgressDialog() {
+    _progressDialogOpen = true;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Exporting messages'),
+        content: ValueListenableBuilder<String>(
+          valueListenable: _uploadStatus,
+          builder: (context, status, _) => Row(
+            children: [
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 16),
+              Expanded(child: Text(status)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _closeProgressDialog() {
+    if (_progressDialogOpen && mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+    _progressDialogOpen = false;
+  }
+
+  /// Returns the saved phone name, prompting the user to choose one if none
+  /// is set yet.
+  Future<String?> _ensurePhoneName() async {
+    final saved = await _settingsService.getPhoneName();
+    if (saved != null && saved.isNotEmpty) return saved;
+    return _showSettingsDialog();
+  }
+
+  /// Shows a dialog for editing the phone name and backend URL, persists
+  /// any changes, and returns the phone name afterwards.
+  Future<String?> _showSettingsDialog() async {
+    final currentName = await _settingsService.getPhoneName() ?? '';
+    final currentUrl = await _settingsService.getBackendUrl();
+    if (!mounted) return null;
+
+    final nameController = TextEditingController(text: currentName);
+    final urlController = TextEditingController(text: currentUrl);
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Device settings'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'Phone name',
+                hintText: 'e.g. Lambert\'s Pixel',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: urlController,
+              decoration: const InputDecoration(
+                labelText: 'Backend URL',
+                hintText: 'http://10.0.2.2:8000',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    if (saved != true) return null;
+
+    final name = nameController.text.trim();
+    final url = urlController.text.trim();
+    if (name.isNotEmpty) await _settingsService.setPhoneName(name);
+    if (url.isNotEmpty) await _settingsService.setBackendUrl(url);
+    return name.isNotEmpty ? name : null;
+  }
+
+  void _showSnackBar(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(message),
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        elevation: 0,
-        title: const Text('MoMo Transactions', 
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 20,
-            fontWeight: FontWeight.bold
-          )
+        title: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.asset(
+                'assets/images/momoLogo.webp',
+                width: 28,
+                height: 28,
+              ),
+            ),
+            const SizedBox(width: 10),
+            const Text(
+              'MoMo Tracker',
+              style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+            ),
+          ],
         ),
-        leading: Container(
-          padding: const EdgeInsets.all(10.0),
-          child: const Image(
-            image: AssetImage('assets/images/momoLogo.webp'),
-          )
-        ),
-        backgroundColor: Colors.green,
         actions: [
           IconButton(
-            icon: const Icon(Icons.calendar_today, color: Colors.white),
+            tooltip: 'Filter by date',
+            icon: const Icon(Icons.calendar_today_outlined),
             onPressed: _selectDateRange,
           ),
           IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.white),
+            tooltip: 'Refresh',
+            icon: const Icon(Icons.refresh_rounded),
             onPressed: _loadTransactions,
           ),
+          IconButton(
+            tooltip: 'Upload to server',
+            icon: _isUploading
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  )
+                : const Icon(Icons.cloud_upload_outlined),
+            onPressed: _isUploading ? null : _exportAndUpload,
+          ),
+          IconButton(
+            tooltip: 'Settings',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: _showSettingsDialog,
+          ),
+          const SizedBox(width: 4),
         ],
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
-            Tab(icon: Icon(Icons.list), text: 'Transactions'),
-            Tab(icon: Icon(Icons.bar_chart), text: 'Analytics'),
+            Tab(icon: Icon(Icons.receipt_long_rounded), text: 'Transactions'),
+            Tab(icon: Icon(Icons.insights_rounded), text: 'Analytics'),
           ],
           labelColor: Colors.white,
+          unselectedLabelColor: Colors.white70,
           indicatorColor: Colors.white,
+          indicatorWeight: 3,
         ),
       ),
       body: TabBarView(
         controller: _tabController,
         children: [
-          Container(
-            color: Colors.grey[100],
-            child: _buildTransactionList(),
-          ),
-          ChartScreen(transactions: _filteredTransactions),
+          _buildTransactionList(),
+          ChartScreen(transactions: _dateFilteredTransactions),
         ],
       ),
     );
@@ -141,21 +365,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Widget _buildTransactionList() {
     if (_isLoading) {
-      return Center(
+      return const Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const CircularProgressIndicator(
-              valueColor: AlwaysStoppedAnimation<Color>(Colors.green),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Loading transactions...',
-              style: TextStyle(
-                color: Colors.grey[600],
-                fontSize: 16,
-              ),
-            ),
+            CircularProgressIndicator(color: Color(0xFF0A8754)),
+            SizedBox(height: 16),
+            Text('Loading transactions...', style: TextStyle(color: Colors.black54, fontSize: 16)),
           ],
         ),
       );
@@ -163,20 +379,22 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
     if (_error != null) {
       return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              'Error: $_error',
-              style: const TextStyle(color: Colors.red),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: _loadTransactions,
-              child: const Text('Retry'),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline_rounded, color: Colors.redAccent, size: 48),
+              const SizedBox(height: 12),
+              Text('Error: $_error', style: const TextStyle(color: Colors.red), textAlign: TextAlign.center),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: _loadTransactions,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Retry'),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -186,216 +404,462 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Text('No transactions found'),
-            if (_selectedDateRange != null)
+            Icon(Icons.inbox_outlined, color: Colors.grey[400], size: 56),
+            const SizedBox(height: 12),
+            const Text('No transactions found', style: TextStyle(color: Colors.black54)),
+            if (_selectedDateRange != null || _selectedType != null)
               TextButton(
                 onPressed: () {
                   setState(() {
                     _selectedDateRange = null;
+                    _selectedType = null;
                     _filterTransactions();
                   });
                 },
-                child: const Text('Clear date filter'),
+                child: const Text('Clear filters'),
               ),
           ],
         ),
       );
     }
 
-    return Column(
-      children: [
-        if (_selectedDateRange != null)
-          Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: Card(
-              elevation: 2,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: ListTile(
-                leading: const Icon(Icons.date_range, color: Colors.green),
-                title: Text(
-                  '${DateFormat('MMM dd, yyyy').format(_selectedDateRange!.start)} - '
-                  '${DateFormat('MMM dd, yyyy').format(_selectedDateRange!.end)}',
-                  style: const TextStyle(fontWeight: FontWeight.w500),
-                ),
-                trailing: IconButton(
-                  icon: const Icon(Icons.close, color: Colors.grey),
-                  onPressed: () {
-                    setState(() {
-                      _selectedDateRange = null;
-                      _filterTransactions();
-                    });
-                  },
-                ),
+    final sections = _groupByDay(_filteredTransactions);
+
+    return RefreshIndicator(
+      color: const Color(0xFF0A8754),
+      onRefresh: _loadTransactions,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+        children: [
+          if (_selectedDateRange != null) _buildDateRangeChip(),
+          _buildSummary(),
+          const SizedBox(height: 8),
+          for (final section in sections) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 16, 8, 8),
+              child: Text(
+                section.label,
+                style: const TextStyle(fontWeight: FontWeight.w700, color: Colors.black54, fontSize: 13),
               ),
             ),
-          ),
-        _buildTransactionSummary(),
-        Expanded(
-          child: RefreshIndicator(
-            color: Colors.green,
-            onRefresh: _loadTransactions,
-            child: ListView.builder(
-              padding: const EdgeInsets.all(8),
-              itemCount: _filteredTransactions.length,
-              itemBuilder: (context, index) {
-                final transaction = _filteredTransactions[index];
-                return _buildTransactionCard(transaction);
-              },
-            ),
-          ),
-        ),
-      ],
+            for (final transaction in section.transactions) _buildTransactionCard(transaction),
+          ],
+        ],
+      ),
     );
   }
 
-  Widget _buildTransactionSummary() {
-    double totalIncoming = 0;
-    double totalOutgoing = 0;
-    double totalPayments = 0;
+  Widget _buildDateRangeChip() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Card(
+        elevation: 0,
+        color: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(color: Colors.grey.shade200),
+        ),
+        child: ListTile(
+          leading: const Icon(Icons.date_range, color: Color(0xFF0A8754)),
+          title: Text(
+            '${DateFormat('MMM dd, yyyy').format(_selectedDateRange!.start)} - '
+            '${DateFormat('MMM dd, yyyy').format(_selectedDateRange!.end)}',
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+          ),
+          trailing: IconButton(
+            icon: const Icon(Icons.close, color: Colors.grey),
+            onPressed: () {
+              setState(() {
+                _selectedDateRange = null;
+                _filterTransactions();
+              });
+            },
+          ),
+        ),
+      ),
+    );
+  }
 
-    for (var transaction in _filteredTransactions) {
-      if (transaction.isIncoming) {
-        totalIncoming += transaction.amount;
-      } else {
-        if (transaction.description.toLowerCase().contains('payment of')) {
-          totalPayments += transaction.amount;
+
+  /// Splits transactions into "Today" / "Yesterday" / a formatted date
+  /// section, preserving the descending date order they already come in.
+  List<_DaySection> _groupByDay(List<Transaction> transactions) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+
+    final sections = <_DaySection>[];
+    DateTime? currentDay;
+    for (final transaction in transactions) {
+      final day = DateTime(transaction.date.year, transaction.date.month, transaction.date.day);
+      if (currentDay == null || day != currentDay) {
+        currentDay = day;
+        String label;
+        if (day == today) {
+          label = 'Today';
+        } else if (day == yesterday) {
+          label = 'Yesterday';
         } else {
-          totalOutgoing += transaction.amount;
+          label = DateFormat('EEEE, MMM d').format(day);
         }
+        sections.add(_DaySection(label, []));
+      }
+      sections.last.transactions.add(transaction);
+    }
+    return sections;
+  }
+
+  /// Computes money in/out from the balance MTN itself reported after each
+  /// SMS, rather than by summing each transaction's face amount.
+  ///
+  /// Text-pattern totals drift badly in practice — bank deposits, self
+  /// transfers to a linked bank account, and per-transfer fees all use
+  /// wording this app doesn't specifically parse, and failed transactions
+  /// still mention an amount despite no money moving. The balance field is
+  /// ground truth: the real change between two consecutive readings is
+  /// exactly what left or entered the account, regardless of wording.
+  /// Falls back to the parsed type/amount only for the rare SMS with no
+  /// balance line (so it still counts toward the category breakdown).
+  _FlowTotals _computeFlows(List<Transaction> transactions) {
+    final chronological = [...transactions]..sort((a, b) => a.date.compareTo(b.date));
+
+    double received = 0;
+    double payments = 0;
+    double transfers = 0;
+    double withdrawals = 0;
+    double purchases = 0;
+    double? latestBalance;
+    DateTime? latestBalanceDate;
+    double? previousBalance;
+
+    for (final transaction in chronological) {
+      double amount = transaction.amount;
+      bool isIncoming = transaction.isIncoming;
+      bool known = transaction.type != TransactionType.other;
+
+      if (transaction.balanceAfter != null) {
+        if (previousBalance != null) {
+          final delta = transaction.balanceAfter! - previousBalance;
+          amount = delta.abs();
+          isIncoming = delta > 0;
+          known = delta != 0;
+        }
+        previousBalance = transaction.balanceAfter;
+        latestBalance = transaction.balanceAfter;
+        latestBalanceDate = transaction.date;
+      }
+
+      if (!known) continue;
+
+      if (isIncoming) {
+        received += amount;
+        continue;
+      }
+
+      switch (transaction.type) {
+        case TransactionType.transfer:
+          transfers += amount;
+          break;
+        case TransactionType.withdrawal:
+          withdrawals += amount;
+          break;
+        case TransactionType.purchase:
+          purchases += amount;
+          break;
+        case TransactionType.payment:
+        case TransactionType.other:
+          payments += amount;
+          break;
+        case TransactionType.received:
+          break;
       }
     }
 
+    return _FlowTotals(
+      received: received,
+      payments: payments,
+      transfers: transfers,
+      withdrawals: withdrawals,
+      purchases: purchases,
+      latestBalance: latestBalance,
+      latestBalanceDate: latestBalanceDate,
+    );
+  }
+
+  Widget _buildSummary() {
+    final flows = _computeFlows(_dateFilteredTransactions);
+    final received = flows.received;
+    final payments = flows.payments;
+    final transfers = flows.transfers;
+    final withdrawals = flows.withdrawals;
+    final purchases = flows.purchases;
+    final latestBalance = flows.latestBalance;
+    final latestBalanceDate = flows.latestBalanceDate;
+
+    final totalOut = payments + transfers + withdrawals + purchases;
     final formatter = NumberFormat("#,##0", "en_US");
 
-    return Card(
-      elevation: 4,
-      margin: const EdgeInsets.all(8),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildBalanceCard(latestBalance, latestBalanceDate, formatter),
+        const SizedBox(height: 10),
+        Row(
           children: [
-            _buildSummaryItem('Income', totalIncoming, Colors.green, Icons.arrow_downward),
-            Container(height: 40, width: 1, color: Colors.grey[300]),
-            _buildSummaryItem('Expenses', totalOutgoing, Colors.red, Icons.arrow_upward),
-            Container(height: 40, width: 1, color: Colors.grey[300]),
-            _buildSummaryItem('Payments', totalPayments, Colors.orange, Icons.payment),
+            Expanded(child: _buildFlowCard('Money in', received, const Color(0xFF0A8754), Icons.arrow_downward_rounded, formatter)),
+            const SizedBox(width: 10),
+            Expanded(child: _buildFlowCard('Money out', totalOut, const Color(0xFFC0392B), Icons.arrow_upward_rounded, formatter)),
           ],
         ),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 96,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            children: [
+              _buildCategoryChip(TransactionType.received, received, formatter),
+              _buildCategoryChip(TransactionType.payment, payments, formatter),
+              _buildCategoryChip(TransactionType.transfer, transfers, formatter),
+              _buildCategoryChip(TransactionType.withdrawal, withdrawals, formatter),
+              _buildCategoryChip(TransactionType.purchase, purchases, formatter),
+            ],
+          ),
+        ),
+        if (_selectedType != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(10),
+              onTap: () => _setTypeFilter(_selectedType),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: _typeStyles[_selectedType]!.color.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.filter_alt, size: 14, color: _typeStyles[_selectedType]!.color),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Showing ${_typeStyles[_selectedType]!.label} only',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: _typeStyles[_selectedType]!.color),
+                    ),
+                    const SizedBox(width: 6),
+                    Icon(Icons.close, size: 14, color: _typeStyles[_selectedType]!.color),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildBalanceCard(double? balance, DateTime? asOf, NumberFormat formatter) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF0A8754), Color(0xFF0D9E63)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(color: const Color(0xFF0A8754).withOpacity(0.25), blurRadius: 16, offset: const Offset(0, 8)),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Current balance', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 6),
+          Text(
+            balance != null ? '${formatter.format(balance)} RWF' : 'Not available',
+            style: const TextStyle(color: Colors.white, fontSize: 30, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            asOf != null
+                ? 'As of last MoMo SMS · ${DateFormat('MMM d, HH:mm').format(asOf)}'
+                : 'No balance reported in this range',
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildSummaryItem(String title, double amount, Color color, IconData icon) {
-    final formatter = NumberFormat("#,##0", "en_US");
-    return Column(
-      children: [
-        Icon(icon, color: color, size: 24),
-        const SizedBox(height: 4),
-        Text(title,
-            style: TextStyle(fontSize: 14, color: Colors.grey[600])),
-        const SizedBox(height: 4),
-        Text(
-          '${formatter.format(amount)} RWF',
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-            color: color,
+  Widget _buildFlowCard(String label, double amount, Color color, IconData icon, NumberFormat formatter) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+            child: Icon(icon, color: color, size: 18),
           ),
+          const SizedBox(height: 10),
+          Text(label, style: const TextStyle(color: Colors.black54, fontSize: 13)),
+          const SizedBox(height: 2),
+          Text(
+            '${formatter.format(amount)} RWF',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: color),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCategoryChip(TransactionType type, double amount, NumberFormat formatter) {
+    final style = _typeStyles[type]!;
+    final selected = _selectedType == type;
+    return GestureDetector(
+      onTap: () => _setTypeFilter(type),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: 128,
+        margin: const EdgeInsets.only(right: 10),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: selected ? style.color.withOpacity(0.12) : Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: selected ? style.color : Colors.grey.shade200, width: 1.5),
         ),
-      ],
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(style.icon, color: style.color, size: 18),
+            const SizedBox(height: 6),
+            Text(style.label, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            const Spacer(),
+            Text(
+              '${formatter.format(amount)} RWF',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: style.color),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
     );
   }
 
   Widget _buildTransactionCard(Transaction transaction) {
     final formatter = NumberFormat("#,##0", "en_US");
-    final bool isPayment = transaction.description.toLowerCase().contains('payment of');
-    final amountColor = transaction.isIncoming 
-        ? Colors.green 
-        : (isPayment ? Colors.orange : Colors.red);
-    final amountPrefix = transaction.isIncoming ? "+" : "-";
-    final IconData transactionIcon = isPayment 
-        ? Icons.payment 
-        : (transaction.isIncoming ? Icons.arrow_downward : Icons.arrow_upward);
+    final style = _typeStyles[transaction.type]!;
+    final amountPrefix = transaction.isIncoming ? '+' : '-';
 
-    return Card(
-      elevation: 2,
-      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.grey.shade200),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: amountColor.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(transactionIcon, color: amountColor),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: style.color.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(10),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    transaction.description,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w500,
+            child: Icon(style.icon, color: style.color, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  transaction.description,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Text(
+                      DateFormat('HH:mm').format(transaction.date),
+                      style: TextStyle(color: Colors.grey[600], fontSize: 12),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Text(
-                        DateFormat('MMM dd, HH:mm').format(transaction.date),
-                        style: TextStyle(
-                          color: Colors.grey[600],
-                          fontSize: 13,
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: style.color.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        style.label,
+                        style: TextStyle(color: style.color, fontSize: 11, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    if (transaction.reference != null) ...[
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'Ref ${transaction.reference}',
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: Colors.grey[500], fontSize: 11),
                         ),
                       ),
-                      if (transaction.reference != null) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.grey[200],
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text(
-                            'Ref: ${transaction.reference}',
-                            style: TextStyle(
-                              color: Colors.grey[700],
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ],
                     ],
-                  ),
-                ],
-              ),
+                  ],
+                ),
+              ],
             ),
-            Text(
-              '$amountPrefix${formatter.format(transaction.amount)} RWF',
-              style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.bold,
-                color: amountColor,
-              ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '$amountPrefix${formatter.format(transaction.amount)}',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.bold,
+              color: transaction.isIncoming ? const Color(0xFF0A8754) : const Color(0xFFC0392B),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
+}
+
+class _DaySection {
+  final String label;
+  final List<Transaction> transactions;
+  _DaySection(this.label, this.transactions);
+}
+
+/// Result of [_HomeScreenState._computeFlows]: totals per category plus the
+/// most recent balance reading found while walking the transactions.
+class _FlowTotals {
+  final double received;
+  final double payments;
+  final double transfers;
+  final double withdrawals;
+  final double purchases;
+  final double? latestBalance;
+  final DateTime? latestBalanceDate;
+
+  const _FlowTotals({
+    required this.received,
+    required this.payments,
+    required this.transfers,
+    required this.withdrawals,
+    required this.purchases,
+    required this.latestBalance,
+    required this.latestBalanceDate,
+  });
 }

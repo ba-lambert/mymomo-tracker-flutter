@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MoMo Tracker Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>MoMo Tracker Dashboard</h1>
+  </header>
+  <main>
+    <div class="card stats">
+      <div class="stat">
+        <div class="value">{{ phones|length }}</div>
+        <div class="label">Registered phones</div>
+      </div>
+      <div class="stat">
+        <div class="value">{{ total_messages }}</div>
+        <div class="label">Total messages stored</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Phones</h2>
+      {% if phones %}
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Messages</th>
+            <th>Registered</th>
+            <th>Last seen</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for phone in phones %}
+          <tr>
+            <td><a class="phone-link" href="/phones/{{ phone.id }}">{{ phone.name }}</a></td>
+            <td>{{ phone.message_count }}</td>
+            <td>{{ phone.registered_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ phone.last_seen_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>
+              <form method="post" action="/phones/{{ phone.id }}/delete" onsubmit="return confirm('Delete {{ phone.name }} and all its messages?');">
+                <button class="btn danger" type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="empty">No phone has registered yet. Export messages from the app to see it here.</p>
+      {% endif %}
+    </div>
+  </main>
+</body>
+</html>

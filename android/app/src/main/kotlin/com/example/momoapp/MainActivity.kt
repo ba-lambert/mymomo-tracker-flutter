@@ -46,25 +46,17 @@ class MainActivity : FlutterActivity() {
 
             cursor?.use {
                 Log.d(TAG, "Total SMS messages in inbox: ${it.count}")
-                
+
                 while (it.moveToNext()) {
-                    val body = it.getString(0)
+                    val body = it.getString(0) ?: continue
                     val date = it.getLong(1)
-                    val address = it.getString(2)
-                    
-                    // Filter M-Money transaction messages
-                    if (address == "M-Money" && 
-                        (body.contains("transferred to", ignoreCase = true) ||
-                         body.contains("payment of", ignoreCase = true) ||
-                         body.contains("received", ignoreCase = true))) {
-                            
-                        messages.add(mapOf(
-                            "body" to body,
-                            "date" to date,
-                            "address" to address
-                        ))
-                        Log.d(TAG, "Added M-Money transaction: $body")
-                    }
+                    val address = it.getString(2) ?: "unknown"
+
+                    messages.add(mapOf(
+                        "body" to body,
+                        "date" to date,
+                        "address" to address
+                    ))
                 }
             }
         } catch (e: Exception) {
@@ -72,7 +64,7 @@ class MainActivity : FlutterActivity() {
             throw e
         }
 
-        Log.d(TAG, "Found ${messages.size} M-Money transactions")
+        Log.d(TAG, "Read ${messages.size} SMS messages")
         return messages
     }
 }
