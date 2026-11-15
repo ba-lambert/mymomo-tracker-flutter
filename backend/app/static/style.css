@@ -146,6 +146,11 @@ a.phone-link {
   color: #6b7a72;
 }
 
+.badge.whatsapp {
+  background: #e7f8f0;
+  color: #25d366;
+}
+
 .empty {
   text-align: center;
   color: #8a9a92;
@@ -232,6 +237,78 @@ a.phone-link {
 .stat-card .label {
   font-size: 12px;
   color: #6b7a72;
+}
+
+/* Source toggle: All / SMS / WhatsApp */
+.source-toggle {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+}
+
+.source-tab {
+  padding: 8px 16px;
+  border-radius: 8px;
+  text-decoration: none;
+  color: #6b7a72;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.source-tab:hover {
+  background: #f1f7f4;
+}
+
+.source-tab.active {
+  background: #0a8754;
+  color: white;
+}
+
+.source-tab .count {
+  opacity: 0.8;
+  font-weight: 500;
+}
+
+/* Pull-messages card */
+.pull-card h2 {
+  margin-top: 0;
+  font-size: 15px;
+}
+
+.pull-hint {
+  font-size: 13px;
+  color: #6b7a72;
+  margin: 0 0 14px;
+  max-width: 640px;
+}
+
+.pull-table {
+  margin-top: 14px;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.pull-table th,
+.pull-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eee;
+  font-size: 13px;
+}
+
+.badge.pull-status-pending {
+  background: #fef3e2;
+  color: #b7791f;
+}
+
+.badge.pull-status-completed {
+  background: #e4f6ec;
+  color: #0a8754;
+}
+
+.badge.pull-status-failed {
+  background: #fdecec;
+  color: #c0392b;
 }
 
 /* Toolbar: date filter + search */

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .database import Base, engine
-from .routers import dashboard, messages, phones
+from .routers import dashboard, messages, phones, pull_requests
 
 Base.metadata.create_all(bind=engine)
 
@@ -21,3 +21,4 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(phones.router)
 app.include_router(messages.router)
 app.include_router(dashboard.router)
+app.include_router(pull_requests.router)

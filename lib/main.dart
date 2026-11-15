@@ -1,7 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:workmanager/workmanager.dart';
 import 'screens/home_screen.dart';
+import 'services/background_export_service.dart';
 
 void main() {
+  // Workmanager's initialize() uses a platform channel, which needs the
+  // binding runApp() normally sets up — call this first or the channel call
+  // silently races the binding and every later WorkManager call throws.
+  WidgetsFlutterBinding.ensureInitialized();
+  Workmanager().initialize(backgroundExportCallbackDispatcher);
+  FlutterForegroundTask.initCommunicationPort();
   runApp(MyApp());
 }
 

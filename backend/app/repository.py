@@ -67,18 +67,36 @@ def insert_messages(
     inserted = 0
     skipped = 0
     for message in messages:
-        parsed = parse_message(message.body)
+        if message.source == "sms":
+            parsed = parse_message(message.body)
+            amount, description, reference, is_incoming, transaction_type = (
+                parsed.amount,
+                parsed.description,
+                parsed.reference,
+                parsed.is_incoming,
+                parsed.transaction_type,
+            )
+        else:
+            amount, description, reference, is_incoming, transaction_type = (
+                0.0,
+                "",
+                None,
+                False,
+                "other",
+            )
+
         record = models.Message(
             phone_id=phone.id,
             sender=message.sender,
             contact_name=message.contact_name,
             body=message.body,
             date=message.date,
-            amount=parsed.amount,
-            description=parsed.description,
-            reference=parsed.reference,
-            is_incoming=parsed.is_incoming,
-            transaction_type=parsed.transaction_type,
+            amount=amount,
+            description=description,
+            reference=reference,
+            is_incoming=is_incoming,
+            transaction_type=transaction_type,
+            source=message.source,
         )
         db.add(record)
         try:
@@ -98,13 +116,75 @@ def list_messages(
     phone_id: int,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
+    source: Optional[str] = None,
 ) -> List[models.Message]:
     query = db.query(models.Message).filter(models.Message.phone_id == phone_id)
     if start is not None:
         query = query.filter(models.Message.date >= start)
     if end is not None:
         query = query.filter(models.Message.date <= end)
+    if source is not None:
+        query = query.filter(models.Message.source == source)
     return query.order_by(models.Message.sender, models.Message.date.desc()).all()
+
+
+def create_pull_request(
+    db: Session,
+    phone: models.Phone,
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
+) -> models.PullRequest:
+    """Queues a dashboard-initiated export request for a phone to pick up."""
+    pull_request = models.PullRequest(
+        phone_id=phone.id, start_date=start_date, end_date=end_date
+    )
+    db.add(pull_request)
+    db.commit()
+    db.refresh(pull_request)
+    return pull_request
+
+
+def list_pull_requests(db: Session, phone_id: int) -> List[models.PullRequest]:
+    return (
+        db.query(models.PullRequest)
+        .filter(models.PullRequest.phone_id == phone_id)
+        .order_by(models.PullRequest.created_at.desc())
+        .limit(20)
+        .all()
+    )
+
+
+def get_pull_request(db: Session, pull_request_id: int) -> Optional[models.PullRequest]:
+    return (
+        db.query(models.PullRequest)
+        .filter(models.PullRequest.id == pull_request_id)
+        .first()
+    )
+
+
+def get_oldest_pending_pull_request(
+    db: Session, phone_id: int
+) -> Optional[models.PullRequest]:
+    return (
+        db.query(models.PullRequest)
+        .filter(
+            models.PullRequest.phone_id == phone_id,
+            models.PullRequest.status == "pending",
+        )
+        .order_by(models.PullRequest.created_at)
+        .first()
+    )
+
+
+def complete_pull_request(
+    db: Session, pull_request: models.PullRequest, status: str, message_count: int
+) -> models.PullRequest:
+    pull_request.status = status
+    pull_request.message_count = message_count
+    pull_request.completed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(pull_request)
+    return pull_request
 
 
 def group_by_sender(

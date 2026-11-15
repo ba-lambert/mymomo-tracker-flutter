@@ -31,6 +31,7 @@ class MessageIn(BaseModel):
     reference: Optional[str] = None
     is_incoming: bool = False
     transaction_type: str = "other"
+    source: str = "sms"
 
 
 class MessageOut(BaseModel):
@@ -46,6 +47,7 @@ class MessageOut(BaseModel):
     reference: Optional[str]
     is_incoming: bool
     transaction_type: str
+    source: str
     uploaded_at: datetime
 
 
@@ -59,3 +61,26 @@ class UploadResult(BaseModel):
     received: int
     inserted: int
     skipped_duplicates: int
+
+
+class PullRequestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    start_date: Optional[datetime]
+    end_date: Optional[datetime]
+    status: str
+    created_at: datetime
+    completed_at: Optional[datetime]
+    message_count: Optional[int]
+
+
+class PendingPull(BaseModel):
+    id: int
+    start_date: Optional[datetime]
+    end_date: Optional[datetime]
+
+
+class PullRequestComplete(BaseModel):
+    message_count: int = 0
+    status: str = "completed"

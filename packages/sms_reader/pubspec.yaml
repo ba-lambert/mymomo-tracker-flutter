@@ -1,0 +1,27 @@
+name: sms_reader
+description: >
+  Reads the device SMS inbox over a platform channel. Registered as a real
+  Flutter plugin (not wired up by hand in MainActivity) so it attaches to
+  every engine the app creates, including the headless engines WorkManager
+  and flutter_foreground_task spin up for background work.
+version: 0.0.1
+publish_to: 'none'
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.example.sms_reader
+        pluginClass: SmsReaderPlugin

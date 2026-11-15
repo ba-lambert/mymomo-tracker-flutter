@@ -13,7 +13,13 @@ class ContactService {
   Future<void> _ensureLoaded() async {
     if (_nameByDigits != null) return;
 
-    final status = await Permission.contacts.request();
+    // Same reasoning as SmsService.getAllMessages(): only call request()
+    // when not already granted, since request() needs a foreground
+    // Activity that the background sync isolate doesn't have.
+    var status = await Permission.contacts.status;
+    if (!status.isGranted) {
+      status = await Permission.contacts.request();
+    }
     if (!status.isGranted) {
       _nameByDigits = {};
       return;

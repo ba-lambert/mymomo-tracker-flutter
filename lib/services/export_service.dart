@@ -12,8 +12,9 @@ class ExportService {
   /// containing a single `messages.json`.
   ///
   /// @param messages - Raw SMS already filtered to the desired date range.
-  /// @returns The zip file written to the system temp directory.
-  Future<File> buildZipExport(List<SmsMessage> messages) async {
+  /// @param directory - Folder to write the zip into; defaults to the system temp directory.
+  /// @returns The zip file written to [directory].
+  Future<File> buildZipExport(List<SmsMessage> messages, {Directory? directory}) async {
     final grouped = <String, List<Map<String, dynamic>>>{};
     for (final message in messages) {
       grouped.putIfAbsent(message.address, () => []).add({
@@ -37,7 +38,9 @@ class ExportService {
     final zipBytes = ZipEncoder().encode(archive)!;
     final fileName =
         'sms_export_${DateTime.now().millisecondsSinceEpoch}.zip';
-    final file = File('${Directory.systemTemp.path}/$fileName');
+    final targetDir = directory ?? Directory.systemTemp;
+    await targetDir.create(recursive: true);
+    final file = File('${targetDir.path}/$fileName');
     await file.writeAsBytes(zipBytes);
     return file;
   }

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
@@ -33,16 +33,22 @@ def phone_detail(
     phone_id: int,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
+    source: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     phone = repository.get_phone(db, phone_id)
     if phone is None:
         return HTMLResponse("Phone not found", status_code=404)
 
-    messages = repository.list_messages(db, phone_id, start, end)
+    all_messages = repository.list_messages(db, phone_id, start, end)
+    messages = [m for m in all_messages if source is None or m.source == source]
     total_in = sum(m.amount for m in messages if m.is_incoming)
     total_out = sum(m.amount for m in messages if not m.is_incoming)
     sender_groups = repository.group_by_sender(messages)
+
+    sms_count = sum(1 for m in all_messages if m.source == "sms")
+    whatsapp_count = sum(1 for m in all_messages if m.source == "whatsapp")
+    pull_requests = repository.list_pull_requests(db, phone_id)
 
     now = datetime.now()
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -58,10 +64,33 @@ def phone_detail(
             "total_out": total_out,
             "start": start,
             "end": end,
+            "source": source,
+            "sms_count": sms_count,
+            "whatsapp_count": whatsapp_count,
+            "pull_requests": pull_requests,
             "month_start": month_start.strftime("%Y-%m-%dT%H:%M"),
             "month_end": now.strftime("%Y-%m-%dT%H:%M"),
         },
     )
+
+
+@router.post("/phones/{phone_id}/pull-requests")
+def request_pull(
+    phone_id: int,
+    start: str = Form(default=""),
+    end: str = Form(default=""),
+    db: Session = Depends(get_db),
+):
+    """Queues an export request for the phone's background task to pick up
+    next time it checks in, then redirects back to the phone's page."""
+    phone = repository.get_phone(db, phone_id)
+    if phone is None:
+        return HTMLResponse("Phone not found", status_code=404)
+
+    start_date = datetime.fromisoformat(start) if start else None
+    end_date = datetime.fromisoformat(end) if end else None
+    repository.create_pull_request(db, phone, start_date, end_date)
+    return RedirectResponse(url=f"/phones/{phone_id}", status_code=303)
 
 
 @router.post("/phones/{phone_id}/delete")

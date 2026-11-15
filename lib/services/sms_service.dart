@@ -1,5 +1,5 @@
-import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:sms_reader/sms_reader.dart';
 import '../models/sms_message.dart';
 import '../models/transaction.dart';
 import 'contact_service.dart';
@@ -7,20 +7,28 @@ import 'momo_counterparty.dart';
 import 'dart:developer' as developer;
 
 class SmsService {
-  static const platform = MethodChannel('com.example.momoapp/sms');
   final _contactService = ContactService();
 
   /// Reads every SMS in the device inbox, regardless of sender, and
   /// attaches each sender's saved contact name when one exists.
   Future<List<SmsMessage>> getAllMessages() async {
-    final status = await Permission.sms.request();
+    // Only call request() when not already granted. request() needs a
+    // foreground Activity to show its system dialog; the background sync
+    // service and WorkManager's headless isolate have none, so calling it
+    // there throws ("Unable to detect current Activity"). Once the user has
+    // granted it once from the foreground (the app's first launch), status
+    // stays granted and every later caller — foreground or background —
+    // can skip straight past this check.
+    var status = await Permission.sms.status;
+    if (!status.isGranted) {
+      status = await Permission.sms.request();
+    }
     if (!status.isGranted) {
       throw Exception('SMS permission denied');
     }
 
     try {
-      final List<dynamic> messages =
-          await platform.invokeMethod('getSmsMessages');
+      final messages = await SmsReader.getSmsMessages();
 
       developer.log('Read ${messages.length} SMS messages');
 

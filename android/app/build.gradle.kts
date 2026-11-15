@@ -7,7 +7,8 @@ plugins {
 
 android {
     namespace = "com.example.momoapp"
-    compileSdk = flutter.compileSdkVersion
+    /* receive_sharing_intent requires compileSdk 37+; flutter.compileSdkVersion still defaults to 36. */
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

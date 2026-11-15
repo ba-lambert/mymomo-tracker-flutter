@@ -59,6 +59,40 @@ class UploadService {
     );
   }
 
+  /// Uploads a batch of already-serialized messages (e.g. parsed WhatsApp
+  /// chat lines) under the given phone name, via the same generic JSON
+  /// endpoint [uploadTransactions] uses.
+  ///
+  /// @param phoneName - Name identifying this device on the backend.
+  /// @param messages - Pre-built message JSON objects, each matching the backend's MessageIn shape.
+  /// @returns How many of the sent messages were received, newly inserted, and skipped as duplicates.
+  /// @throws {Exception} If the backend responds with a non-200 status.
+  Future<UploadSummary> uploadRawMessages({
+    required String phoneName,
+    required List<Map<String, dynamic>> messages,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/messages/upload');
+    final response = await http.post(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'phone_name': phoneName,
+        'messages': messages,
+      }),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Upload failed (${response.statusCode}): ${response.body}');
+    }
+
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    return UploadSummary(
+      received: json['received'] as int,
+      inserted: json['inserted'] as int,
+      skippedDuplicates: json['skipped_duplicates'] as int,
+    );
+  }
+
   /// Uploads a zip export (built by [ExportService]) under the given phone
   /// name. The backend unzips it, groups the contained messages by sender,
   /// and stores them against this phone.

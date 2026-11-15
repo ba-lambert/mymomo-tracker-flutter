@@ -97,9 +97,10 @@ def get_phone_messages(
     phone_id: int,
     start: Optional[datetime] = Query(default=None),
     end: Optional[datetime] = Query(default=None),
+    source: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     phone = repository.get_phone(db, phone_id)
     if phone is None:
         raise HTTPException(status_code=404, detail="Phone not found")
-    return repository.list_messages(db, phone_id, start, end)
+    return repository.list_messages(db, phone_id, start, end, source)

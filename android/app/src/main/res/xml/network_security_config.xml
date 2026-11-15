@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android blocks plain HTTP by default on modern SDKs; the backend is
+     reached by raw IP with no TLS cert, so this explicitly allows
+     cleartext traffic to just that one address instead of broadly. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">109.199.97.39</domain>
+    </domain-config>
+</network-security-config>

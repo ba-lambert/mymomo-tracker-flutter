@@ -8,7 +8,11 @@
 </head>
 <body>
   {% macro type_badge(message) %}
+  {% if message.source == 'whatsapp' %}
+  <span class="badge whatsapp">&#128172; WhatsApp</span>
+  {% else %}
   <span class="badge {{ message.transaction_type }}">{{ message.transaction_type|capitalize }}</span>
+  {% endif %}
   {% endmacro %}
 
   {% macro message_row(message, show_sender=true) %}
@@ -67,13 +71,15 @@
       </div>
     </div>
 
+    {% set date_qs = ('start=' + start.strftime('%Y-%m-%dT%H:%M') + '&end=' + end.strftime('%Y-%m-%dT%H:%M')) if start and end else '' %}
     <div class="card toolbar">
       <form class="filter-form" method="get" action="/phones/{{ phone.id }}">
+        <input type="hidden" name="source" value="{{ source or '' }}" />
         <label>From <input type="datetime-local" name="start" value="{{ start.strftime('%Y-%m-%dT%H:%M') if start else '' }}" /></label>
         <label>To <input type="datetime-local" name="end" value="{{ end.strftime('%Y-%m-%dT%H:%M') if end else '' }}" /></label>
         <button class="btn" type="submit">Filter dates</button>
-        <a class="btn secondary" href="/phones/{{ phone.id }}?start={{ month_start }}&end={{ month_end }}">This month</a>
-        <a class="btn secondary" href="/phones/{{ phone.id }}">Clear</a>
+        <a class="btn secondary" href="/phones/{{ phone.id }}?start={{ month_start }}&end={{ month_end }}{{ '&source=' + source if source else '' }}">This month</a>
+        <a class="btn secondary" href="/phones/{{ phone.id }}{{ '?source=' + source if source else '' }}">Clear</a>
       </form>
       <input
         id="searchBox"
@@ -82,6 +88,61 @@
         placeholder="Search message text or reference..."
         oninput="filterMessages(this.value)"
       />
+    </div>
+
+    <div class="card source-toggle">
+      <a class="source-tab {{ 'active' if not source else '' }}" href="/phones/{{ phone.id }}{{ ('?' + date_qs) if date_qs else '' }}">
+        All <span class="count">{{ sms_count + whatsapp_count }}</span>
+      </a>
+      <a class="source-tab {{ 'active' if source == 'sms' else '' }}" href="/phones/{{ phone.id }}?source=sms{{ ('&' + date_qs) if date_qs else '' }}">
+        &#128241; SMS <span class="count">{{ sms_count }}</span>
+      </a>
+      <a class="source-tab {{ 'active' if source == 'whatsapp' else '' }}" href="/phones/{{ phone.id }}?source=whatsapp{{ ('&' + date_qs) if date_qs else '' }}">
+        &#128172; WhatsApp <span class="count">{{ whatsapp_count }}</span>
+      </a>
+    </div>
+
+    <div class="card pull-card">
+      <h2>Pull messages from this phone</h2>
+      <p class="pull-hint">
+        Queues an export request. The phone picks it up next time its background task checks in
+        (or next time you tap Upload/Import on it) and uploads SMS for the chosen range automatically.
+        WhatsApp still needs a manual export/import on the phone — Android has no remote access to it.
+      </p>
+      <form class="filter-form" method="post" action="/phones/{{ phone.id }}/pull-requests">
+        <label>From <input type="datetime-local" name="start" /></label>
+        <label>To <input type="datetime-local" name="end" /></label>
+        <button class="btn" type="submit">Request pull</button>
+      </form>
+
+      {% if pull_requests %}
+      <table class="pull-table">
+        <thead>
+          <tr>
+            <th>Requested</th>
+            <th>Range</th>
+            <th>Status</th>
+            <th>Messages</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for pr in pull_requests %}
+          <tr>
+            <td>{{ pr.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>
+              {% if pr.start_date and pr.end_date %}
+                {{ pr.start_date.strftime('%Y-%m-%d') }} &rarr; {{ pr.end_date.strftime('%Y-%m-%d') }}
+              {% else %}
+                Last 30 days (default)
+              {% endif %}
+            </td>
+            <td><span class="badge pull-status-{{ pr.status }}">{{ pr.status|capitalize }}</span></td>
+            <td>{{ pr.message_count if pr.message_count is not none else "-" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
     </div>
 
     {% if not sender_groups %}
