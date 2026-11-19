@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import '../models/transaction.dart';
 import '../services/sms_service.dart';
-import '../services/settings_service.dart';
 import '../services/background_export_service.dart';
+import '../utils/transaction_style.dart';
+import '../utils/flow_totals.dart';
 import 'package:intl/intl.dart';
 import 'charts_screen.dart';
 
@@ -13,34 +14,9 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-/// Visual styling (icon, color, label) for each [TransactionType], shared
-/// between the summary cards and the transaction list so both stay in sync.
-class _TypeStyle {
-  final IconData icon;
-  final Color color;
-  final String label;
-  const _TypeStyle(this.icon, this.color, this.label);
-}
-
-const _typeStyles = <TransactionType, _TypeStyle>{
-  TransactionType.received:
-      _TypeStyle(Icons.call_received_rounded, Color(0xFF0A8754), 'Received'),
-  TransactionType.payment:
-      _TypeStyle(Icons.storefront_rounded, Color(0xFFE08A00), 'Payment'),
-  TransactionType.transfer:
-      _TypeStyle(Icons.call_made_rounded, Color(0xFFC0392B), 'Transfer'),
-  TransactionType.withdrawal:
-      _TypeStyle(Icons.money_off_rounded, Color(0xFFAD1457), 'Withdrawal'),
-  TransactionType.purchase:
-      _TypeStyle(Icons.shopping_bag_rounded, Color(0xFF5B3DC4), 'Purchase'),
-  TransactionType.other:
-      _TypeStyle(Icons.receipt_long_rounded, Color(0xFF6B7A72), 'Other'),
-};
-
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   final _smsService = SmsService();
-  final _settingsService = SettingsService();
   List<Transaction> _transactions = [];
   List<Transaction> _dateFilteredTransactions = [];
   List<Transaction> _filteredTransactions = [];
@@ -132,87 +108,6 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  /// Shows a dialog for editing the phone name and backend URL, persists
-  /// any changes, and returns the phone name afterwards.
-  Future<String?> _showSettingsDialog() async {
-    final currentName = await _settingsService.getPhoneName() ?? '';
-    final currentUrl = await _settingsService.getBackendUrl();
-    var autoExportEnabled = await _settingsService.isAutoExportEnabled();
-    if (!mounted) return null;
-
-    final nameController = TextEditingController(text: currentName);
-    final urlController = TextEditingController(text: currentUrl);
-
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: const Text('Device settings'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                decoration: const InputDecoration(
-                  labelText: 'Phone name',
-                  hintText: 'e.g. Lambert\'s Pixel',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: urlController,
-                decoration: const InputDecoration(
-                  labelText: 'Backend URL',
-                  hintText: 'http://10.0.2.2:8000',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 8),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Auto export & upload'),
-                subtitle: const Text(
-                    'Exports new SMS every few hours in the background'),
-                value: autoExportEnabled,
-                onChanged: (value) =>
-                    setDialogState(() => autoExportEnabled = value),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('Save'),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    if (saved != true) return null;
-
-    final name = nameController.text.trim();
-    final url = urlController.text.trim();
-    if (name.isNotEmpty) await _settingsService.setPhoneName(name);
-    if (url.isNotEmpty) await _settingsService.setBackendUrl(url);
-
-    await _settingsService.setAutoExportEnabled(autoExportEnabled);
-    if (autoExportEnabled) {
-      await enableAutoExport();
-    } else {
-      await disableAutoExport();
-    }
-
-    return name.isNotEmpty ? name : null;
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -247,11 +142,6 @@ class _HomeScreenState extends State<HomeScreen>
             tooltip: 'Refresh',
             icon: const Icon(Icons.refresh_rounded),
             onPressed: _loadTransactions,
-          ),
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: _showSettingsDialog,
           ),
           const SizedBox(width: 4),
         ],
@@ -432,86 +322,8 @@ class _HomeScreenState extends State<HomeScreen>
     return sections;
   }
 
-  /// Computes money in/out from the balance MTN itself reported after each
-  /// SMS, rather than by summing each transaction's face amount.
-  ///
-  /// Text-pattern totals drift badly in practice — bank deposits, self
-  /// transfers to a linked bank account, and per-transfer fees all use
-  /// wording this app doesn't specifically parse, and failed transactions
-  /// still mention an amount despite no money moving. The balance field is
-  /// ground truth: the real change between two consecutive readings is
-  /// exactly what left or entered the account, regardless of wording.
-  /// Falls back to the parsed type/amount only for the rare SMS with no
-  /// balance line (so it still counts toward the category breakdown).
-  _FlowTotals _computeFlows(List<Transaction> transactions) {
-    final chronological = [...transactions]
-      ..sort((a, b) => a.date.compareTo(b.date));
-
-    double received = 0;
-    double payments = 0;
-    double transfers = 0;
-    double withdrawals = 0;
-    double purchases = 0;
-    double? latestBalance;
-    DateTime? latestBalanceDate;
-    double? previousBalance;
-
-    for (final transaction in chronological) {
-      double amount = transaction.amount;
-      bool isIncoming = transaction.isIncoming;
-      bool known = transaction.type != TransactionType.other;
-
-      if (transaction.balanceAfter != null) {
-        if (previousBalance != null) {
-          final delta = transaction.balanceAfter! - previousBalance;
-          amount = delta.abs();
-          isIncoming = delta > 0;
-          known = delta != 0;
-        }
-        previousBalance = transaction.balanceAfter;
-        latestBalance = transaction.balanceAfter;
-        latestBalanceDate = transaction.date;
-      }
-
-      if (!known) continue;
-
-      if (isIncoming) {
-        received += amount;
-        continue;
-      }
-
-      switch (transaction.type) {
-        case TransactionType.transfer:
-          transfers += amount;
-          break;
-        case TransactionType.withdrawal:
-          withdrawals += amount;
-          break;
-        case TransactionType.purchase:
-          purchases += amount;
-          break;
-        case TransactionType.payment:
-        case TransactionType.other:
-          payments += amount;
-          break;
-        case TransactionType.received:
-          break;
-      }
-    }
-
-    return _FlowTotals(
-      received: received,
-      payments: payments,
-      transfers: transfers,
-      withdrawals: withdrawals,
-      purchases: purchases,
-      latestBalance: latestBalance,
-      latestBalanceDate: latestBalanceDate,
-    );
-  }
-
   Widget _buildSummary() {
-    final flows = _computeFlows(_dateFilteredTransactions);
+    final flows = computeFlows(_dateFilteredTransactions);
     final received = flows.received;
     final payments = flows.payments;
     final transfers = flows.transfers;
@@ -574,25 +386,25 @@ class _HomeScreenState extends State<HomeScreen>
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
-                  color: _typeStyles[_selectedType]!.color.withOpacity(0.1),
+                  color: transactionTypeStyles[_selectedType]!.color.withOpacity(0.1),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(Icons.filter_alt,
-                        size: 14, color: _typeStyles[_selectedType]!.color),
+                        size: 14, color: transactionTypeStyles[_selectedType]!.color),
                     const SizedBox(width: 6),
                     Text(
-                      'Showing ${_typeStyles[_selectedType]!.label} only',
+                      'Showing ${transactionTypeStyles[_selectedType]!.label} only',
                       style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
-                          color: _typeStyles[_selectedType]!.color),
+                          color: transactionTypeStyles[_selectedType]!.color),
                     ),
                     const SizedBox(width: 6),
                     Icon(Icons.close,
-                        size: 14, color: _typeStyles[_selectedType]!.color),
+                        size: 14, color: transactionTypeStyles[_selectedType]!.color),
                   ],
                 ),
               ),
@@ -683,7 +495,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildCategoryChip(
       TransactionType type, double amount, NumberFormat formatter) {
-    final style = _typeStyles[type]!;
+    final style = transactionTypeStyles[type]!;
     final selected = _selectedType == type;
     return GestureDetector(
       onTap: () => _setTypeFilter(type),
@@ -722,7 +534,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildTransactionCard(Transaction transaction) {
     final formatter = NumberFormat("#,##0", "en_US");
-    final style = _typeStyles[transaction.type]!;
+    final style = transactionTypeStyles[transaction.type]!;
     final amountPrefix = transaction.isIncoming ? '+' : '-';
 
     return Material(
@@ -822,7 +634,7 @@ class _HomeScreenState extends State<HomeScreen>
   /// the list view truncates the message to a single line.
   void _showTransactionDetails(Transaction transaction) {
     final formatter = NumberFormat("#,##0", "en_US");
-    final style = _typeStyles[transaction.type]!;
+    final style = transactionTypeStyles[transaction.type]!;
 
     showDialog<void>(
       context: context,
@@ -885,24 +697,3 @@ class _DaySection {
   _DaySection(this.label, this.transactions);
 }
 
-/// Result of [_HomeScreenState._computeFlows]: totals per category plus the
-/// most recent balance reading found while walking the transactions.
-class _FlowTotals {
-  final double received;
-  final double payments;
-  final double transfers;
-  final double withdrawals;
-  final double purchases;
-  final double? latestBalance;
-  final DateTime? latestBalanceDate;
-
-  const _FlowTotals({
-    required this.received,
-    required this.payments,
-    required this.transfers,
-    required this.withdrawals,
-    required this.purchases,
-    required this.latestBalance,
-    required this.latestBalanceDate,
-  });
-}
