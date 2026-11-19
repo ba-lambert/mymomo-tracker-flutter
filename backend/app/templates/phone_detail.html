@@ -71,12 +71,12 @@
       </div>
     </div>
 
-    {% set date_qs = ('start=' + start.strftime('%Y-%m-%dT%H:%M') + '&end=' + end.strftime('%Y-%m-%dT%H:%M')) if start and end else '' %}
+    {% set date_qs = ('start=' + start.strftime('%Y-%m-%d') + '&end=' + end.strftime('%Y-%m-%d')) if start and end else '' %}
     <div class="card toolbar">
       <form class="filter-form" method="get" action="/phones/{{ phone.id }}">
         <input type="hidden" name="source" value="{{ source or '' }}" />
-        <label>From <input type="datetime-local" name="start" value="{{ start.strftime('%Y-%m-%dT%H:%M') if start else '' }}" /></label>
-        <label>To <input type="datetime-local" name="end" value="{{ end.strftime('%Y-%m-%dT%H:%M') if end else '' }}" /></label>
+        <label>From <input type="date" name="start" value="{{ start.strftime('%Y-%m-%d') if start else '' }}" /></label>
+        <label>To <input type="date" name="end" value="{{ end.strftime('%Y-%m-%d') if end else '' }}" /></label>
         <button class="btn" type="submit">Filter dates</button>
         <a class="btn secondary" href="/phones/{{ phone.id }}?start={{ month_start }}&end={{ month_end }}{{ '&source=' + source if source else '' }}">This month</a>
         <a class="btn secondary" href="/phones/{{ phone.id }}{{ '?source=' + source if source else '' }}">Clear</a>

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -40,6 +40,13 @@ def phone_detail(
     if phone is None:
         return HTMLResponse("Phone not found", status_code=404)
 
+    # A plain "To" date (no time of day) means "through the end of that
+    # day" to anyone picking it, but compares as that day's midnight,
+    # excluding everything but messages at exactly 00:00:00. Treat a
+    # midnight end as end-of-day so the picked day is fully included.
+    if end is not None and end.time() == time.min:
+        end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
+
     all_messages = repository.list_messages(db, phone_id, start, end)
     messages = [m for m in all_messages if source is None or m.source == source]
     total_in = sum(m.amount for m in messages if m.is_incoming)
@@ -68,8 +75,8 @@ def phone_detail(
             "sms_count": sms_count,
             "whatsapp_count": whatsapp_count,
             "pull_requests": pull_requests,
-            "month_start": month_start.strftime("%Y-%m-%dT%H:%M"),
-            "month_end": now.strftime("%Y-%m-%dT%H:%M"),
+            "month_start": month_start.strftime("%Y-%m-%d"),
+            "month_end": now.strftime("%Y-%m-%d"),
         },
     )
 
